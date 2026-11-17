@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relief Maker – Photo to 3D Printable Relief</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1d2027; --panel2: #252932; --text: #e6e8ee;
+    --muted: #8b93a3; --accent: #4f9cff; --border: #2f3440;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #sidebar { width: 340px; min-width: 340px; background: var(--panel); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 16px; }
+  #viewport { flex: 1; position: relative; }
+  #viewport canvas { display: block; }
+  h1 { font-size: 17px; margin: 0 0 12px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    margin: 18px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  #drop { border: 2px dashed var(--border); border-radius: 8px; padding: 14px; text-align: center;
+    cursor: pointer; color: var(--muted); transition: .15s; }
+  #drop.over, #drop:hover { border-color: var(--accent); color: var(--text); }
+  #drop img { max-width: 100%; max-height: 120px; display: block; margin: 0 auto 6px; border-radius: 4px; }
+  .row { margin: 8px 0; }
+  .row label { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  .row label span.val { color: var(--accent); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+  select, button { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text); font: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+    padding: 11px; margin-top: 6px; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .btns { display: flex; gap: 6px; }
+  #stats { background: var(--panel2); border-radius: 6px; padding: 8px 10px; color: var(--muted);
+    font-variant-numeric: tabular-nums; white-space: pre-line; }
+  #heightmap { width: 100%; image-rendering: pixelated; border-radius: 4px; background: #000; display: none; }
+  #hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 15px; pointer-events: none; }
+  #busy { position: absolute; top: 12px; right: 12px; background: var(--panel2); padding: 6px 10px;
+    border-radius: 6px; display: none; }
+  .note { color: var(--muted); font-size: 11px; margin-top: 4px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>Relief Maker</h1>
+    <div id="drop">
+      <div id="dropContent">Drop a photo here, click to browse,<br>or paste (⌘V)</div>
+    </div>
+    <input type="file" id="file" accept="image/*" hidden>
+
+    <h2>Mode</h2>
+    <select id="mode">
+      <option value="relief">Relief (light areas raised)</option>
+      <option value="litho">Lithophane (dark areas thick, backlit)</option>
+    </select>
+
+    <div id="controls"></div>
+
+    <h2>Preview</h2>
+    <select id="view">
+      <option value="solid">Solid shaded</option>
+      <option value="backlit">Backlit (lithophane simulation)</option>
+    </select>
+    <canvas id="heightmap"></canvas>
+
+    <h2>Output</h2>
+    <div id="stats">No image loaded.</div>
+    <button class="primary" id="export" disabled>Download STL</button>
+    <div class="btns" style="margin-top:6px">
+      <button id="resetView" disabled>Reset view</button>
+      <button id="resetSettings">Reset settings</button>
+    </div>
+    <div class="note">Units are millimetres. Mesh is closed (watertight) and ready for slicing.</div>
+  </aside>
+  <main id="viewport">
+    <div id="hint">Load an image to begin</div>
+    <div id="busy">Generating…</div>
+  </main>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------- settings
+const PARAMS = [
+  { group: 'Size' },
+  { id: 'width',      label: 'Width',            unit: 'mm',    min: 10,   max: 300, step: 1,    value: 100 },
+  { id: 'base',       label: 'Base thickness',   unit: 'mm',    min: 0.2,  max: 10,  step: 0.1,  value: 2 },
+  { id: 'relief',     label: 'Relief height',    unit: 'mm',    min: 0.1,  max: 20,  step: 0.1,  value: 3 },
+  { group: 'Quality' },
+  { id: 'res',        label: 'Resolution',       unit: 'px/mm', min: 0.5,  max: 10,  step: 0.5,  value: 4 },
+  { id: 'smooth',     label: 'Detail smoothing', unit: 'px',    min: 0,    max: 10,  step: 1,    value: 1 },
+  { group: 'Light / dark transitions' },
+  { id: 'transition', label: 'Transition softening', unit: 'mm', min: 0,   max: 10,  step: 0.1,  value: 0,
+    fmt: v => v == 0 ? 'off' : `${v} mm` },
+  { id: 'maxSlope',   label: 'Max slope',        unit: '°',     min: 5,    max: 90,  step: 1,    value: 90,
+    fmt: v => v >= 90 ? 'off' : `${v}°` },
+  { note: 'Softening blends edges between light and dark areas over a set distance. Max slope turns sharp steps into even ramps without blurring flat areas.' },
+  { group: 'Image adjustments' },
+  { id: 'brightness', label: 'Brightness',       unit: '',      min: -100, max: 100, step: 1,    value: 0 },
+  { id: 'contrast',   label: 'Contrast',         unit: '',      min: -100, max: 100, step: 1,    value: 0 },
+  { id: 'gamma',      label: 'Gamma',            unit: '',      min: 0.2,  max: 3,   step: 0.05, value: 1 },
+  { check: 'invert',  label: 'Invert (dark areas raised)', value: false },
+  { check: 'mirror',  label: 'Mirror horizontally',        value: false },
+  { group: 'Frame' },
+  { id: 'border',     label: 'Frame width',      unit: 'mm',    min: 0,    max: 20,  step: 0.5,  value: 0 },
+  { id: 'borderH',    label: 'Frame height (above base)', unit: 'mm', min: 0, max: 20, step: 0.1, value: 3 },
+  { select: 'bevelStyle', label: 'Bevel style', value: 'chamfer', options: [
+      ['chamfer', 'Chamfer (straight 45° style)'], ['round', 'Rounded (convex)'],
+      ['cove', 'Cove (concave)'], ['ogee', 'Ogee (S-curve)'] ] },
+  { id: 'outerBevel', label: 'Outer bevel width', unit: 'mm',  min: 0,    max: 20,  step: 0.25, value: 0 },
+  { id: 'innerBevel', label: 'Inner bevel width', unit: 'mm',  min: 0,    max: 20,  step: 0.25, value: 0 },
+  { id: 'bevelDepth', label: 'Outer bevel depth', unit: '%',   min: 0,    max: 100, step: 1,    value: 100 },
+  { note: 'Outer bevel slopes the frame down toward the plate edge. Inner bevel blends the frame into the image. Bevels share the frame width.' },
+];
+const PRESETS = {
+  relief: { base: 2,   relief: 3,   invert: false, borderH: 3,   view: 'solid' },
+  litho:  { base: 0.8, relief: 2.4, invert: true,  borderH: 2.4, view: 'backlit', border: 3, res: 5 },
+};
+const MAX_CELLS = 1_500_000;
+
+const $ = id => document.getElementById(id);
+const controlsEl = $('controls');
+const inputs = {};
+
+for (const p of PARAMS) {
+  if (p.group) {
+    const h = document.createElement('h2'); h.textContent = p.group; controlsEl.appendChild(h);
+  } else if (p.note) {
+    const d = document.createElement('div'); d.className = 'note'; d.textContent = p.note; controlsEl.appendChild(d);
+  } else if (p.select) {
+    const d = document.createElement('div'); d.className = 'row';
+    d.innerHTML = `<label>${p.label}</label><select id="${p.select}">${
+      p.options.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
+    controlsEl.appendChild(d);
+    const sel = d.querySelector('select'); sel.value = p.value;
+    sel.addEventListener('change', schedule);
+    inputs[p.select] = sel;
+  } else if (p.check) {
+    const l = document.createElement('label'); l.className = 'check';
+    l.innerHTML = `<input type="checkbox" id="${p.check}"> ${p.label}`;
+    controlsEl.appendChild(l);
+    inputs[p.check] = l.querySelector('input');
+    inputs[p.check].checked = p.value;
+    inputs[p.check].addEventListener('change', schedule);
+  } else {
+    const d = document.createElement('div'); d.className = 'row';
+    d.innerHTML = `<label>${p.label}<span class="val"></span></label>
+      <input type="range" id="${p.id}" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.value}">`;
+    controlsEl.appendChild(d);
+    const inp = d.querySelector('input'), val = d.querySelector('.val');
+    const show = () => val.textContent = p.fmt ? p.fmt(parseFloat(inp.value)) : `${inp.value} ${p.unit}`.trim();
+    inp.addEventListener('input', () => { show(); schedule(); });
+    inp._show = show; show();
+    inputs[p.id] = inp;
+  }
+}
+
+function setValue(id, v) {
+  const el = inputs[id]; if (!el) return;
+  if (el.type === 'checkbox') el.checked = v; else { el.value = v; el._show?.(); }
+}
+function getParams() {
+  const o = {};
+  for (const [k, el] of Object.entries(inputs)) o[k] = el.type === 'checkbox' ? el.checked : el.tagName === 'SELECT' ? el.value : parseFloat(el.value);
+  return o;
+}
+function resetSettings() {
+  for (const p of PARAMS) if (p.id || p.check || p.select) setValue(p.id || p.check || p.select, p.value);
+  applyPreset($('mode').value);
+}
+function applyPreset(mode) {
+  const pr = PRESETS[mode];
+  for (const [k, v] of Object.entries(pr)) if (k !== 'view') setValue(k, v);
+  if (mode === 'relief') setValue('border', 0);
+  $('view').value = pr.view;
+  schedule();
+}
+$('mode').addEventListener('change', e => applyPreset(e.target.value));
+$('view').addEventListener('change', () => { if (mesh) updateMaterial(); });
+$('resetSettings').addEventListener('click', resetSettings);
+
+// ---------------------------------------------------------------- image input
+let img = null;
+const fileInput = $('file'), drop = $('drop');
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => fileInput.files[0] && loadFile(fileInput.files[0]));
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('over');
+  const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')); if (f) loadFile(f);
+});
+window.addEventListener('paste', e => {
+  const it = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  if (it) loadFile(it.getAsFile());
+});
+
+function loadFile(file) {
+  const url = URL.createObjectURL(file);
+  const im = new Image();
+  im.onload = () => {
+    img = im;
+    $('dropContent').innerHTML = `<img src="${url}"><div>${file.name || 'pasted image'} — ${im.width}×${im.height}</div>`;
+    $('hint').style.display = 'none';
+    $('export').disabled = false; $('resetView').disabled = false;
+    needsFit = true;
+    schedule();
+  };
+  im.onerror = () => alert('Could not read that image.');
+  im.src = url;
+}
+
+// ---------------------------------------------------------------- image processing
+function boxBlur(src, w, h, r) {
+  const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+  const win = 2 * r + 1;
+  for (let y = 0; y < h; y++) {                      // horizontal
+    const row = y * w; let acc = 0;
+    for (let k = -r; k <= r; k++) acc += src[row + Math.min(w - 1, Math.max(0, k))];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = acc / win;
+      acc += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {                      // vertical
+    let acc = 0;
+    for (let k = -r; k <= r; k++) acc += tmp[Math.min(h - 1, Math.max(0, k)) * w + x];
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = acc / win;
+      acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+    }
+  }
+  return out;
+}
+
+// bevel profiles: s=0 at low end, s=1 at frame top; return 0..1
+const BEVEL_PROFILES = {
+  chamfer: s => s,
+  round:   s => Math.sqrt(Math.max(0, 1 - (1 - s) * (1 - s))),
+  cove:    s => 1 - Math.sqrt(Math.max(0, 1 - s * s)),
+  ogee:    s => s * s * (3 - 2 * s),
+};
+
+// Two-pass chamfer propagation (8-neighbour) limiting height change per cell.
+// dir=-1: lower peaks (min), dir=1: raise valleys (max).
+function slopeLimit(src, w, h, sx, sy, dir) {
+  const a = Float32Array.from(src), sd = Math.hypot(sx, sy);
+  const upd = (k, n, s) => {
+    if (dir < 0) { if (a[n] + s < a[k]) a[k] = a[n] + s; }
+    else if (a[n] - s > a[k]) a[k] = a[n] - s;
+  };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const k = y * w + x;
+    if (x > 0) upd(k, k - 1, sx);
+    if (y > 0) {
+      upd(k, k - w, sy);
+      if (x > 0) upd(k, k - w - 1, sd);
+      if (x < w - 1) upd(k, k - w + 1, sd);
+    }
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const k = y * w + x;
+    if (x < w - 1) upd(k, k + 1, sx);
+    if (y < h - 1) {
+      upd(k, k + w, sy);
+      if (x < w - 1) upd(k, k + w + 1, sd);
+      if (x > 0) upd(k, k + w - 1, sd);
+    }
+  }
+  return a;
+}
+
+function buildHeightField(p) {
+  const aspect = img.height / img.width;
+  const W = p.width, H = p.width * aspect;
+  let cols = Math.max(2, Math.round(W * p.res) + 1);
+  let rows = Math.max(2, Math.round(H * p.res) + 1);
+  if (cols * rows > MAX_CELLS) {
+    const s = Math.sqrt(MAX_CELLS / (cols * rows));
+    cols = Math.max(2, Math.floor(cols * s)); rows = Math.max(2, Math.floor(rows * s));
+  }
+
+  const cv = document.createElement('canvas'); cv.width = cols; cv.height = rows;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  if (p.mirror) { ctx.translate(cols, 0); ctx.scale(-1, 1); }
+  ctx.drawImage(img, 0, 0, cols, rows);
+  const px = ctx.getImageData(0, 0, cols, rows).data;
+
+  let v = new Float32Array(cols * rows);
+  const contrast = p.contrast >= 0 ? 1 + p.contrast / 25 : 1 + p.contrast / 100;
+  const b = p.brightness / 100, invG = 1 / p.gamma;
+  for (let i = 0; i < v.length; i++) {
+    const a = px[i * 4 + 3] / 255;   // transparent pixels become white
+    let l = (0.2126 * px[i * 4] + 0.7152 * px[i * 4 + 1] + 0.0722 * px[i * 4 + 2]) / 255;
+    l = l * a + (1 - a);
+    l = (l - 0.5) * contrast + 0.5 + b;
+    l = Math.min(1, Math.max(0, l));
+    v[i] = Math.pow(l, invG);
+  }
+  if (p.smooth > 0) for (let k = 0; k < 3; k++) v = boxBlur(v, cols, rows, p.smooth);  // ≈ gaussian
+
+  const dx = W / (cols - 1), dy = H / (rows - 1);
+  for (let k = 0; k < v.length; k++) {
+    const t = Math.min(1, Math.max(0, v[k]));
+    v[k] = p.invert ? 1 - t : t;
+  }
+
+  // soften light/dark transitions: gaussian-ish blur with radius in mm (independent of resolution)
+  if (p.transition > 0) {
+    const r = Math.max(1, Math.round(p.transition / dx / 1.7));  // 3 box passes ≈ gaussian, sigma ≈ r
+    for (let k = 0; k < 3; k++) v = boxBlur(v, cols, rows, r);
+  }
+  // limit slope: average of "cut down" and "build up" limited fields keeps ramps centred on edges
+  if (p.maxSlope < 90 && p.relief > 0) {
+    const tan = Math.tan(p.maxSlope * Math.PI / 180) / p.relief;   // in normalised height units
+    const lo = slopeLimit(v, cols, rows, dx * tan, dy * tan, -1);
+    const hi = slopeLimit(v, cols, rows, dx * tan, dy * tan, 1);
+    for (let k = 0; k < v.length; k++) v[k] = (lo[k] + hi[k]) / 2;
+  }
+
+  // frame + bevels
+  const prof = BEVEL_PROFILES[p.bevelStyle] || BEVEL_PROFILES.chamfer;
+  let ob = p.outerBevel, ib = p.innerBevel;
+  if (ob + ib > p.border && ob + ib > 0) { const s = p.border / (ob + ib); ob *= s; ib *= s; }
+  const frameTop = p.base + p.borderH;
+  const obLow = p.base + p.borderH * (1 - p.bevelDepth / 100);
+  const z = new Float32Array(cols * rows);
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const k = j * cols + i;
+    const img = p.base + v[k] * p.relief;
+    z[k] = img;
+    if (p.border > 0) {
+      const x = i * dx, y = j * dy;
+      const d = Math.min(x, W - x, y, H - y);
+      if (d <= p.border) {
+        let h = frameTop;
+        if (ib > 0 && d > p.border - ib) h = img + (frameTop - img) * prof((p.border - d) / ib);
+        if (ob > 0 && d < ob) h = obLow + (h - obLow) * prof(d / ob);
+        z[k] = h;
+      }
+    }
+  }
+  return { cols, rows, W, H, dx, dy, z, v };
+}
+
+// ---------------------------------------------------------------- mesh
+// Closed solid: heightmap top, vertical side walls, flat bottom (fan triangulated).
+// Z up, origin at bottom-left corner of the plate, units mm.
+function buildMesh(f) {
+  const { cols, rows, dx, dy, z } = f;
+  const N = cols * rows;
+  const perim = [];                                         // CCW seen from above
+  for (let i = 0; i < cols - 1; i++) perim.push((rows - 1) * cols + i);      // bottom edge (y=0)
+  for (let j = rows - 1; j > 0; j--) perim.push(j * cols + cols - 1);        // right edge
+  for (let i = cols - 1; i > 0; i--) perim.push(i);                          // top edge
+  for (let j = 0; j < rows - 1; j++) perim.push(j * cols);                   // left edge
+  const n = perim.length;
+
+  const vCount = N + 3 * n + 1;
+  const pos = new Float32Array(vCount * 3);
+  const isTop = new Uint8Array(vCount);
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const k = j * cols + i;
+    pos[k * 3] = i * dx; pos[k * 3 + 1] = (rows - 1 - j) * dy; pos[k * 3 + 2] = z[k];
+    isTop[k] = 1;
+  }
+  const WT = N, WB = N + n, BB = N + 2 * n, C = N + 3 * n;
+  for (let k = 0; k < n; k++) {
+    const s = perim[k] * 3;
+    for (const [base, zz] of [[WT, pos[s + 2]], [WB, 0], [BB, 0]]) {
+      const d = (base + k) * 3;
+      pos[d] = pos[s]; pos[d + 1] = pos[s + 1]; pos[d + 2] = zz;
+    }
+  }
+  pos[C * 3] = f.W / 2; pos[C * 3 + 1] = f.H / 2; pos[C * 3 + 2] = 0;
+
+  const triCount = 2 * (cols - 1) * (rows - 1) + 2 * n + n;
+  const idx = new Uint32Array(triCount * 3);
+  let t = 0;
+  for (let j = 0; j < rows - 1; j++) for (let i = 0; i < cols - 1; i++) {
+    const d = j * cols + i, c = d + 1, a = d + cols, b = a + 1;   // a,b lower; d,c upper (in y)
+    idx[t++] = a; idx[t++] = b; idx[t++] = c;
+    idx[t++] = a; idx[t++] = c; idx[t++] = d;
+  }
+  for (let k = 0; k < n; k++) {
+    const k2 = (k + 1) % n;
+    const ta = WT + k, tb = WT + k2, ba = WB + k, bb = WB + k2;
+    idx[t++] = ba; idx[t++] = bb; idx[t++] = tb;
+    idx[t++] = ba; idx[t++] = tb; idx[t++] = ta;
+    idx[t++] = C; idx[t++] = BB + k2; idx[t++] = BB + k;
+  }
+  return { pos, idx, triCount, isTop };
+}
+
+function exportSTL(m) {
+  const { pos, idx, triCount } = m;
+  const buf = new ArrayBuffer(84 + triCount * 50);
+  const dv = new DataView(buf);
+  const header = 'Relief Maker binary STL (mm)';
+  for (let i = 0; i < header.length; i++) dv.setUint8(i, header.charCodeAt(i));
+  dv.setUint32(80, triCount, true);
+  let o = 84;
+  for (let t = 0; t < triCount; t++) {
+    const a = idx[t * 3] * 3, b = idx[t * 3 + 1] * 3, c = idx[t * 3 + 2] * 3;
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    dv.setFloat32(o, nx, true); dv.setFloat32(o + 4, ny, true); dv.setFloat32(o + 8, nz, true); o += 12;
+    for (const v of [a, b, c]) {
+      dv.setFloat32(o, pos[v], true); dv.setFloat32(o + 4, pos[v + 1], true); dv.setFloat32(o + 8, pos[v + 2], true);
+      o += 12;
+    }
+    dv.setUint16(o, 0, true); o += 2;
+  }
+  return new Blob([buf], { type: 'model/stl' });
+}
+
+// ---------------------------------------------------------------- 3D view
+const viewport = $('viewport');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+viewport.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x15171c);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 5000);
+camera.up.set(0, 0, 1);
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.2));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(-1, 1.2, 1.4); scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.5); fill.position.set(1, -1, 0.6); scene.add(fill);
+const grid = new THREE.GridHelper(400, 40, 0x3a4050, 0x262a33);
+grid.rotation.x = Math.PI / 2; grid.position.z = -0.01; scene.add(grid);
+
+let mesh = null, lastMesh = null, lastField = null, needsFit = false;
+const solidMat = new THREE.MeshStandardMaterial({ color: 0xd9d4cc, roughness: 0.75, metalness: 0 });
+const backlitMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+
+function resize() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize); resize();
+(function loop() { requestAnimationFrame(loop); orbit.update(); renderer.render(scene, camera); })();
+
+function fitView() {
+  if (!lastField) return;
+  const s = Math.max(lastField.W, lastField.H);
+  camera.position.set(0, -s * 1.1, s * 1.1);
+  orbit.target.set(0, 0, 0); orbit.update();
+}
+$('resetView').addEventListener('click', fitView);
+
+function updateMaterial() {
+  const backlit = $('view').value === 'backlit';
+  if (backlit && !mesh.geometry.getAttribute('color')) {
+    // light transmitted through plastic falls off ~exponentially with thickness
+    const { pos, isTop } = lastMesh;
+    const n = pos.length / 3, col = new Float32Array(n * 3);
+    let zmin = Infinity;
+    for (let i = 0; i < n; i++) if (isTop[i]) zmin = Math.min(zmin, pos[i * 3 + 2]);
+    for (let i = 0; i < n; i++) {
+      const c = isTop[i] ? Math.exp(-1.1 * (pos[i * 3 + 2] - zmin)) : 0.05;
+      col[i * 3] = c; col[i * 3 + 1] = c * 0.9; col[i * 3 + 2] = c * 0.72;
+    }
+    mesh.geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+  mesh.material = backlit ? backlitMat : solidMat;
+}
+
+function drawHeightmap(f) {
+  const c = $('heightmap'); c.style.display = 'block';
+  c.width = f.cols; c.height = f.rows;
+  const ctx = c.getContext('2d'), id = ctx.createImageData(f.cols, f.rows);
+  for (let i = 0; i < f.v.length; i++) {
+    const g = f.v[i] * 255;
+    id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = g; id.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(id, 0, 0);
+}
+
+// ---------------------------------------------------------------- regenerate
+let timer = null;
+function schedule() {
+  if (!img) return;
+  $('busy').style.display = 'block';
+  clearTimeout(timer);
+  timer = setTimeout(regenerate, 120);
+}
+
+function regenerate() {
+  const p = getParams();
+  const f = buildHeightField(p);
+  const m = buildMesh(f);
+  lastField = f; lastMesh = m;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(m.pos, 3));
+  geo.setIndex(new THREE.BufferAttribute(m.idx, 1));
+  geo.computeVertexNormals();
+  if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+  mesh = new THREE.Mesh(geo, solidMat);
+  mesh.position.set(-f.W / 2, -f.H / 2, 0);
+  scene.add(mesh);
+  updateMaterial();
+  if (needsFit) { fitView(); needsFit = false; }
+
+  drawHeightmap(f);
+  const maxZ = p.base + Math.max(p.relief, p.border > 0 ? p.borderH : 0);
+  const mb = (84 + m.triCount * 50) / 1048576;
+  $('stats').textContent =
+    `Size: ${f.W.toFixed(1)} × ${f.H.toFixed(1)} × ${maxZ.toFixed(1)} mm\n` +
+    `Grid: ${f.cols} × ${f.rows} (${(f.W / (f.cols - 1)).toFixed(3)} mm/px)` +
+    (f.cols * f.rows >= MAX_CELLS * 0.98 ? ' — capped' : '') + `\n` +
+    `Triangles: ${m.triCount.toLocaleString()}\n` +
+    `STL size: ${mb.toFixed(1)} MB`;
+  $('busy').style.display = 'none';
+}
+
+$('export').addEventListener('click', () => {
+  if (!lastMesh) return;
+  const blob = exportSTL(lastMesh);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `relief_${$('mode').value}_${Math.round(lastField.W)}mm.stl`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+</script>
+</body>
+</html>
