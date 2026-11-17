@@ -2,6 +2,8 @@
 
 Turn a 2D photo into a 3D-printable relief or lithophane, entirely in your browser.
 
+**Try it live:** https://sausagerolls.github.io/relief-maker/
+
 ## Usage
 
 1. Open `index.html` in a modern browser (internet connection needed to load Three.js from a CDN).
@@ -27,3 +29,7 @@ No install, no build step, and your images never leave your machine.
 - Relief: ~4 px/mm is plenty.
 - Lithophane: white PLA, 100% infill, 0.1–0.12 mm layers, print standing upright.
 - Use a max slope of 45–60° to reduce overhangs on high-contrast images.
+
+## License
+
+[MIT](LICENSE)
