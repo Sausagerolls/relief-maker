@@ -26,7 +26,10 @@
   #drop img { max-width: 100%; max-height: 120px; display: block; margin: 0 auto 6px; border-radius: 4px; }
   .row { margin: 8px 0; }
   .row label { display: flex; justify-content: space-between; margin-bottom: 3px; }
-  .row label span.val { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .row label .valwrap { display: flex; align-items: center; gap: 4px; }
+  .row label span.val { color: var(--muted); min-width: 34px; }
+  .num { width: 64px; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--accent); font: inherit; font-variant-numeric: tabular-nums; text-align: right; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
   select, button { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
@@ -98,14 +101,14 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // ---------------------------------------------------------------- settings
 const PARAMS = [
   { group: 'Size' },
-  { id: 'width',      label: 'Width',            unit: 'mm',    min: 10,   max: 300, step: 1,    value: 100 },
-  { id: 'base',       label: 'Base thickness',   unit: 'mm',    min: 0.2,  max: 10,  step: 0.1,  value: 2 },
-  { id: 'relief',     label: 'Relief height',    unit: 'mm',    min: 0.1,  max: 20,  step: 0.1,  value: 3 },
+  { id: 'width',      label: 'Width',            unit: 'mm',    min: 10,   max: 500, step: 1,    value: 100, typeMax: 1000 },
+  { id: 'base',       label: 'Base thickness',   unit: 'mm',    min: 0.2,  max: 50,  step: 0.1,  value: 2,   typeMax: 200 },
+  { id: 'relief',     label: 'Relief height',    unit: 'mm',    min: 0.1,  max: 100, step: 0.1,  value: 3,   typeMax: 300 },
   { group: 'Quality' },
   { id: 'res',        label: 'Resolution',       unit: 'px/mm', min: 0.5,  max: 10,  step: 0.5,  value: 4 },
   { id: 'smooth',     label: 'Detail smoothing', unit: 'px',    min: 0,    max: 10,  step: 1,    value: 1 },
   { group: 'Light / dark transitions' },
-  { id: 'transition', label: 'Transition softening', unit: 'mm', min: 0,   max: 10,  step: 0.1,  value: 0,
+  { id: 'transition', label: 'Transition softening', unit: 'mm', min: 0,   max: 20,  step: 0.1,  value: 0,   typeMax: 100,
     fmt: v => v == 0 ? 'off' : `${v} mm` },
   { id: 'maxSlope',   label: 'Max slope',        unit: '°',     min: 5,    max: 90,  step: 1,    value: 90,
     fmt: v => v >= 90 ? 'off' : `${v}°` },
@@ -117,13 +120,13 @@ const PARAMS = [
   { check: 'invert',  label: 'Invert (dark areas raised)', value: false },
   { check: 'mirror',  label: 'Mirror horizontally',        value: false },
   { group: 'Frame' },
-  { id: 'border',     label: 'Frame width',      unit: 'mm',    min: 0,    max: 20,  step: 0.5,  value: 0 },
-  { id: 'borderH',    label: 'Frame height (above base)', unit: 'mm', min: 0, max: 20, step: 0.1, value: 3 },
+  { id: 'border',     label: 'Frame width',      unit: 'mm',    min: 0,    max: 50,  step: 0.5,  value: 0,   typeMax: 200 },
+  { id: 'borderH',    label: 'Frame height (above base)', unit: 'mm', min: 0, max: 100, step: 0.1, value: 3, typeMax: 300 },
   { select: 'bevelStyle', label: 'Bevel style', value: 'chamfer', options: [
       ['chamfer', 'Chamfer (straight 45° style)'], ['round', 'Rounded (convex)'],
       ['cove', 'Cove (concave)'], ['ogee', 'Ogee (S-curve)'] ] },
-  { id: 'outerBevel', label: 'Outer bevel width', unit: 'mm',  min: 0,    max: 20,  step: 0.25, value: 0 },
-  { id: 'innerBevel', label: 'Inner bevel width', unit: 'mm',  min: 0,    max: 20,  step: 0.25, value: 0 },
+  { id: 'outerBevel', label: 'Outer bevel width', unit: 'mm',  min: 0,    max: 50,  step: 0.25, value: 0,   typeMax: 200 },
+  { id: 'innerBevel', label: 'Inner bevel width', unit: 'mm',  min: 0,    max: 50,  step: 0.25, value: 0,   typeMax: 200 },
   { id: 'bevelDepth', label: 'Outer bevel depth', unit: '%',   min: 0,    max: 100, step: 1,    value: 100 },
   { note: 'Outer bevel slopes the frame down toward the plate edge. Inner bevel blends the frame into the image. Bevels share the frame width.' },
 ];
@@ -159,14 +162,33 @@ for (const p of PARAMS) {
     inputs[p.check].addEventListener('change', schedule);
   } else {
     const d = document.createElement('div'); d.className = 'row';
-    d.innerHTML = `<label>${p.label}<span class="val"></span></label>
-      <input type="range" id="${p.id}" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.value}">`;
+    // slider covers the common range; the number box accepts larger values up to typeMax
+    const hardMax = p.typeMax ?? p.max;
+    d.innerHTML = `<label>${p.label}<span class="valwrap"><input type="number" class="num" min="${p.min}"
+        max="${hardMax}" step="${p.step}" value="${p.value}"><span class="val"></span></span></label>
+      <input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.value}">`;
     controlsEl.appendChild(d);
-    const inp = d.querySelector('input'), val = d.querySelector('.val');
-    const show = () => val.textContent = p.fmt ? p.fmt(parseFloat(inp.value)) : `${inp.value} ${p.unit}`.trim();
-    inp.addEventListener('input', () => { show(); schedule(); });
-    inp._show = show; show();
-    inputs[p.id] = inp;
+    const num = d.querySelector('.num'), range = d.querySelector('input[type=range]'), val = d.querySelector('.val');
+    num.id = p.id;
+    const show = () => {
+      const v = parseFloat(num.value);
+      const f = p.fmt ? p.fmt(v) : '';
+      val.textContent = f === 'off' ? 'off' : p.unit;
+      range.value = Math.min(p.max, v);
+    };
+    range.addEventListener('input', () => { num.value = range.value; show(); schedule(); });
+    num.addEventListener('input', () => {
+      if (num.value === '' || isNaN(parseFloat(num.value))) return;
+      show(); schedule();
+    });
+    num.addEventListener('change', () => {           // clamp on commit
+      let v = parseFloat(num.value);
+      if (isNaN(v)) v = p.value;
+      num.value = Math.min(hardMax, Math.max(p.min, v));
+      show(); schedule();
+    });
+    num._show = show; show();
+    inputs[p.id] = num;
   }
 }
 

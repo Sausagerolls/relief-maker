@@ -16,7 +16,8 @@ No install, no build step, and your images never leave your machine.
 ## Features
 
 - **Modes**: Relief (light areas raised) or Lithophane (dark areas thick, for backlit prints).
-- **Size**: width in mm (height follows the image aspect ratio), base thickness, relief height.
+- **Size**: width in mm (height follows the image aspect ratio), base thickness up to 200 mm, relief height up to 300 mm.
+- **Precise entry**: every slider has a number box; type values beyond the slider range.
 - **Quality**: resolution (0.5–10 px/mm, capped at 1.5M grid points) and detail smoothing.
 - **Image adjustments**: brightness, contrast, gamma, invert, mirror.
 - **Light/dark transitions**: transition softening (blur in mm) and a max-slope limiter that turns hard steps into even ramps.
